@@ -1,14 +1,16 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 from llama_stack_client import LlamaStackClient
 import os
 import asyncio
-from fastapi.responses import StreamingResponse
 import json
+import logging
 import threading
 import queue
 import yaml
+from datetime import datetime, timezone
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
@@ -19,6 +21,7 @@ app = FastAPI(title="Canopy Backend API")
 
 # Load configuration with fallback for testing
 config_path = os.getenv("CANOPY_CONFIG_PATH", "/canopy/canopy-config.yaml")
+# config_path = os.getenv("CANOPY_CONFIG_PATH", "./canopy-config.yaml")
 if os.path.exists(config_path):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
@@ -31,6 +34,7 @@ if os.path.exists(config_path):
         "summarize": "summarize" in config and config["summarize"]["enabled"] == True,
         "student-assistant": "student-assistant" in config and config["student-assistant"]["enabled"] == True,
         "shields": "shields" in config and config["shields"]["enabled"] == True,
+        "feedback": "feedback" in config and config["feedback"]["enabled"] == True,
     }
 
     # Shields configuration
@@ -51,6 +55,7 @@ else:
         "summarize": False,
         "student-assistant": False,
         "shields": False,
+        "feedback": False,
     }
     SHIELDS_CONFIG = {}
 
@@ -174,13 +179,126 @@ if FEATURE_FLAGS.get("student-assistant", False):
         checkpointer=MemorySaver()
     )
 
+# Structured logger for feedback events (collected by LokiStack via STDOUT)
+feedback_logger = logging.getLogger("canopy.feedback")
+feedback_logger.setLevel(logging.INFO)
+feedback_logger.propagate = False  # Prevent duplicate output from root logger
+_feedback_handler = logging.StreamHandler()
+_feedback_handler.setFormatter(logging.Formatter('%(message)s'))
+feedback_logger.addHandler(_feedback_handler)
+
+# In-memory feedback store (data lost on restart - acceptable for enablement)
+feedback_store: List[Dict[str, Any]] = []
+
 class PromptRequest(BaseModel):
     prompt: str
+
+class FeedbackRequest(BaseModel):
+    input_text: str
+    response_text: str
+    rating: str  # "thumbs_up" or "thumbs_down"
+    feature: str = "summarize"
+    comment: Optional[str] = None
 
 @app.get("/feature-flags")
 async def get_feature_flags() -> Dict[str, Any]:
     """Get all feature flags configuration"""
     return FEATURE_FLAGS
+
+@app.post("/feedback")
+async def submit_feedback(request: FeedbackRequest):
+    """Submit thumbs up/down feedback on an AI response."""
+    if not FEATURE_FLAGS.get("feedback", False):
+        raise HTTPException(status_code=404, detail="Feedback feature is not enabled")
+
+    feedback_entry = {
+        "id": len(feedback_store) + 1,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "feature": request.feature,
+        "rating": request.rating,
+        "input_text": request.input_text,
+        "response_text": request.response_text,
+        "comment": request.comment,
+    }
+
+    feedback_store.append(feedback_entry)
+
+    # Structured log for LokiStack (JSON on STDOUT is auto-collected)
+    feedback_logger.info(json.dumps({
+        "event": "feedback_submitted",
+        "feedback_id": feedback_entry["id"],
+        "feature": request.feature,
+        "rating": request.rating,
+        "input_length": len(request.input_text),
+        "response_length": len(request.response_text),
+        "timestamp": feedback_entry["timestamp"],
+    }))
+
+    return {"status": "ok", "feedback_id": feedback_entry["id"]}
+
+
+@app.get("/feedback")
+async def list_feedback():
+    """List all collected feedback entries."""
+    if not FEATURE_FLAGS.get("feedback", False):
+        raise HTTPException(status_code=404, detail="Feedback feature is not enabled")
+
+    return {
+        "total": len(feedback_store),
+        "feedback": feedback_store,
+    }
+
+
+@app.get("/feedback/export")
+async def export_feedback_for_eval():
+    """Export negative feedback as eval-compatible dataset.
+
+    Format matches canopy-evals summary_tests.yaml structure.
+    """
+    if not FEATURE_FLAGS.get("feedback", False):
+        raise HTTPException(status_code=404, detail="Feedback feature is not enabled")
+
+    negative_feedback = [
+        entry for entry in feedback_store if entry["rating"] == "thumbs_down"
+    ]
+
+    tests = []
+    for entry in negative_feedback:
+        tests.append({
+            "prompt": entry["input_text"],
+            "expected_result": "",  # To be filled by human reviewer
+        })
+
+    eval_dataset = {
+        "name": "feedback_eval_tests",
+        "description": "Tests generated from negative user feedback on summarization.",
+        "endpoint": "/summarize",
+        "scoring_params": {
+            "llm-as-judge::base": {
+                "judge_model": "llama32",
+                "prompt_template": "judge_prompt.txt",
+                "type": "llm_as_judge",
+                "judge_score_regexes": ["Answer: (A|B|C|D|E)"],
+            },
+            "basic::subset_of": None,
+        },
+        "tests": tests,
+    }
+
+    yaml_output = yaml.dump(eval_dataset, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+    feedback_logger.info(json.dumps({
+        "event": "feedback_exported",
+        "total_negative": len(negative_feedback),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }))
+
+    return Response(
+        content=yaml_output,
+        media_type="application/x-yaml",
+        headers={"Content-Disposition": "attachment; filename=feedback-eval-dataset.yaml"},
+    )
+
 
 @app.post("/summarize")
 async def summarize(request: PromptRequest):

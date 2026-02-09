@@ -224,6 +224,18 @@
         }
       },
       "additionalProperties": false
+    },
+    "feedback": {
+      "type": "object",
+      "description": "Configuration for user feedback collection on AI responses",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable or disable feedback collection functionality",
+          "default": false
+        }
+      },
+      "additionalProperties": false
     }
   },
   "required": ["LLAMA_STACK_URL"],
