@@ -17,7 +17,8 @@ spec:
         monitoring.opendatahub.io/scrape: 'true'
       annotations:
         configmap: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
-        instrumentation.opentelemetry.io/inject-python: redhat-ods-monitoring/data-science-instrumentation
+        # Use local instrumentation CR for traces (metrics stay with RHOAI)
+        instrumentation.opentelemetry.io/inject-python: "true"
     spec:
       containers:
         - name: canopy-backend
@@ -31,12 +32,15 @@ spec:
               value: "1.0"
             - name: OTEL_LOGS_EXPORTER
               value: "none"
+            # TRACES go to user's toolings namespace collector
             - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
-              value: "http://data-science-collector-collector-headless.redhat-ods-monitoring.svc.cluster.local:4318/v1/traces"
+              value: "http://trace-collector-collector.{{ .Values.toolingsNamespace | default (printf "%s-toolings" (trimSuffix "-canopy" .Release.Namespace | trimSuffix "-test" | trimSuffix "-prod")) }}.svc.cluster.local:4318/v1/traces"
+            # METRICS stay with RHOAI (unchanged)
             - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
               value: "http://data-science-collector-collector-headless.redhat-ods-monitoring.svc.cluster.local:4318/v1/metrics"
+            # General endpoint for traces
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://data-science-collector-collector-headless.redhat-ods-monitoring.svc.cluster.local:4318"
+              value: "http://trace-collector-collector.{{ .Values.toolingsNamespace | default (printf "%s-toolings" (trimSuffix "-canopy" .Release.Namespace | trimSuffix "-test" | trimSuffix "-prod")) }}.svc.cluster.local:4318"
             - name: TELEMETRY_SINKS
               value: "otel_trace"
           volumeMounts:

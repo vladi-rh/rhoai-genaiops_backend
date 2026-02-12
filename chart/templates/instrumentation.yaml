@@ -1,0 +1,42 @@
+---
+# OpenTelemetry Instrumentation CR for automatic Python instrumentation
+# Required in same namespace as the pods to enable auto-instrumentation
+# Traces go to local collector, Metrics go to RHOAI collector
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: canopy-instrumentation
+spec:
+  exporter:
+    # Default endpoint (used for traces) - local collector in toolings namespace
+    endpoint: http://trace-collector-collector.{{ .Values.toolingsNamespace | default (printf "%s-toolings" (trimSuffix "-canopy" .Release.Namespace | trimSuffix "-test" | trimSuffix "-prod")) }}.svc.cluster.local:4317
+  propagators:
+    - tracecontext
+    - baggage
+    - b3
+  sampler:
+    type: parentbased_traceidratio
+    argument: "1.0"
+  python:
+    image: 'ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-python:0.59b0'
+    resourceRequirements:
+      limits:
+        cpu: 500m
+        memory: 256Mi
+      requests:
+        cpu: 50m
+        memory: 64Mi
+    env:
+      # Traces go to local collector (toolings namespace)
+      - name: OTEL_TRACES_EXPORTER
+        value: otlp
+      - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+        value: http://trace-collector-collector.{{ .Values.toolingsNamespace | default (printf "%s-toolings" (trimSuffix "-canopy" .Release.Namespace | trimSuffix "-test" | trimSuffix "-prod")) }}.svc.cluster.local:4318/v1/traces
+      # Metrics go to RHOAI collector
+      - name: OTEL_METRICS_EXPORTER
+        value: otlp
+      - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+        value: http://data-science-collector-collector-headless.redhat-ods-monitoring.svc.cluster.local:4318/v1/metrics
+      # Disable logs
+      - name: OTEL_LOGS_EXPORTER
+        value: none
