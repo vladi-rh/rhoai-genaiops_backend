@@ -10,10 +10,12 @@ spec:
   selector:
     matchLabels:
       app: canopy-backend
+      app.kubernetes.io/name: canopy-be
   template:
     metadata:
       labels:
         app: canopy-backend
+        app.kubernetes.io/name: canopy-be
         monitoring.opendatahub.io/scrape: 'true'
       annotations:
         configmap: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
